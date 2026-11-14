@@ -14,6 +14,8 @@ import {
   Platform,
   Switch,
   Alert,
+  GestureResponderEvent,
+  PanResponderGestureState,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
@@ -21,6 +23,116 @@ import * as DocumentPicker from 'expo-document-picker';
 import * as Haptics from 'expo-haptics';
 
 const PORT = 8080;
+
+// ---------- Types ----------
+type IconName = React.ComponentProps<typeof Ionicons>['name'];
+type Timer = ReturnType<typeof setTimeout>;
+
+type ModKey = 'control' | 'alt' | 'shift' | 'command';
+type ShortcutMod = 'mod' | 'alt' | 'shift' | ModKey;
+type MouseButton = 'left' | 'middle' | 'right';
+type PowerName = 'sleep' | 'hibernate' | 'logoff' | 'restart' | 'shutdown';
+type TabKey = 'pad' | 'keys' | 'fast' | 'files';
+type PadMode = 'rel' | 'abs';
+
+interface KeyShortcut {
+  icon: IconName;
+  label: string;
+  key: string;
+  mods: ShortcutMod[];
+  color?: string;
+}
+
+interface ActionShortcut {
+  icon: IconName;
+  label: string;
+  action: string;
+  color?: string;
+}
+
+type Shortcut = KeyShortcut | ActionShortcut;
+
+interface PowerItem {
+  icon: IconName;
+  label: string;
+  name: PowerName;
+  color?: string;
+  note: string;
+}
+
+interface Settings {
+  speed: number;
+  mode: PadMode;
+  dragLock: boolean;
+  natural: boolean;
+}
+
+interface HostInfo {
+  host?: string;
+  platform?: string;
+  screen?: { width: number; height: number };
+}
+
+interface PendingPower {
+  name: string;
+  left: number;
+}
+
+interface FileItem {
+  id: string;
+  name: string;
+  size?: number;
+  progress: number;
+  status: 'uploading' | 'done' | 'error';
+}
+
+interface GestureData {
+  lx: number;
+  ly: number;
+  moved: number;
+  start: number;
+  max: number;
+  lastN: number;
+  lastDist: number;
+  timer: Timer | undefined;
+  holdDrag: boolean;
+  down: boolean;
+  ox: number;
+  oy: number;
+  w: number;
+  h: number;
+}
+
+interface Accumulator {
+  dx: number;
+  dy: number;
+  sy: number;
+  zoom: number;
+  abs: { x: number; y: number } | null;
+}
+
+// Messages sent to the PC
+type OutMsg =
+  | { t: 'auth'; pin: string }
+  | { t: 'ping'; ts: number }
+  | { t: 'down' }
+  | { t: 'up' }
+  | { t: 'abs'; x: number; y: number }
+  | { t: 'move'; dx: number; dy: number }
+  | { t: 'scroll'; dy: number }
+  | { t: 'zoom'; steps: number }
+  | { t: 'click'; button: MouseButton }
+  | { t: 'action'; name: string }
+  | { t: 'key'; key: string; mods: ShortcutMod[] }
+  | { t: 'type'; text: string }
+  | { t: 'power'; name: PowerName | 'cancel' }
+  | { t: 'openDrops' };
+
+// Messages received from the PC
+type InMsg =
+  | ({ t: 'auth'; ok: boolean } & HostInfo)
+  | { t: 'pong'; ts: number }
+  | { t: 'power'; state: string; name: string; seconds: number };
 
 // ---------- Monochrome design tokens ----------
 const C = {
@@ -37,17 +149,26 @@ const C = {
   ok: '#34D399',
   warn: '#FBBF24',
   danger: '#F87171',
+} as const;
+
+const haptic = (): void => {
+  try {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+  } catch (e) {}
 };
 
-const haptic = () => {
-  try { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); } catch (e) {}
-};
-
-const fmtSize = (b = 0) =>
+const fmtSize = (b: number = 0): string =>
   b > 1048576 ? (b / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(b / 1024)) + ' KB';
 
 // ---------- Reusable components ----------
-const Tile = ({ icon, label, onPress, color }) => (
+interface TileProps {
+  icon: IconName;
+  label: string;
+  onPress?: () => void;
+  color?: string;
+}
+
+const Tile = ({ icon, label, onPress, color }: TileProps) => (
   <TouchableOpacity
     activeOpacity={0.6}
     onPress={() => { haptic(); onPress && onPress(); }}
@@ -60,7 +181,13 @@ const Tile = ({ icon, label, onPress, color }) => (
   </TouchableOpacity>
 );
 
-const ModChip = ({ label, active, onPress }) => (
+interface ModChipProps {
+  label: string;
+  active: boolean;
+  onPress: () => void;
+}
+
+const ModChip = ({ label, active, onPress }: ModChipProps) => (
   <TouchableOpacity
     activeOpacity={0.7}
     onPress={() => { haptic(); onPress(); }}
@@ -70,33 +197,60 @@ const ModChip = ({ label, active, onPress }) => (
   </TouchableOpacity>
 );
 
-const Section = ({ title, children }) => (
+interface SectionProps {
+  title: string;
+  children?: React.ReactNode;
+}
+
+const Section = ({ title, children }: SectionProps) => (
   <View style={{ marginBottom: 24 }}>
     <Text style={st.sectionTitle}>{title}</Text>
     <View style={st.grid}>{children}</View>
   </View>
 );
 
-const Segmented = ({ options, value, onChange }) => (
-  <View style={st.seg}>
-    {options.map((o) => {
-      const on = o.value === value;
-      return (
-        <TouchableOpacity
-          key={o.value}
-          activeOpacity={0.8}
-          onPress={() => { haptic(); onChange(o.value); }}
-          style={[st.segItem, on && st.segItemOn]}
-        >
-          <Ionicons name={o.icon} size={15} color={on ? C.onAccent : C.sub} />
-          <Text style={[st.segTxt, on && { color: C.onAccent }]}>{o.label}</Text>
-        </TouchableOpacity>
-      );
-    })}
-  </View>
-);
+interface SegmentedOption<T extends string> {
+  value: T;
+  label: string;
+  icon: IconName;
+}
 
-const ToggleCard = ({ icon, title, sub, value, onChange }) => (
+interface SegmentedProps<T extends string> {
+  options: SegmentedOption<T>[];
+  value: T;
+  onChange: (v: T) => void;
+}
+
+function Segmented<T extends string>({ options, value, onChange }: SegmentedProps<T>) {
+  return (
+    <View style={st.seg}>
+      {options.map((o) => {
+        const on = o.value === value;
+        return (
+          <TouchableOpacity
+            key={o.value}
+            activeOpacity={0.8}
+            onPress={() => { haptic(); onChange(o.value); }}
+            style={[st.segItem, on && st.segItemOn]}
+          >
+            <Ionicons name={o.icon} size={15} color={on ? C.onAccent : C.sub} />
+            <Text style={[st.segTxt, on && { color: C.onAccent }]}>{o.label}</Text>
+          </TouchableOpacity>
+        );
+      })}
+    </View>
+  );
+}
+
+interface ToggleCardProps {
+  icon: IconName;
+  title: string;
+  sub: string;
+  value: boolean;
+  onChange: (v: boolean) => void;
+}
+
+const ToggleCard = ({ icon, title, sub, value, onChange }: ToggleCardProps) => (
   <TouchableOpacity
     activeOpacity={0.8}
     onPress={() => { haptic(); onChange(!value); }}
@@ -108,7 +262,7 @@ const ToggleCard = ({ icon, title, sub, value, onChange }) => (
       </View>
       <Switch
         value={value}
-        onValueChange={(v) => { haptic(); onChange(v); }}
+        onValueChange={(v: boolean) => { haptic(); onChange(v); }}
         trackColor={{ false: C.line2, true: '#FFFFFF' }}
         thumbColor={value ? '#000000' : '#8E8E93'}
         ios_backgroundColor={C.line2}
@@ -121,7 +275,7 @@ const ToggleCard = ({ icon, title, sub, value, onChange }) => (
 );
 
 // ---------- Shortcut definitions ----------
-const EDIT = [
+const EDIT: KeyShortcut[] = [
   { icon: 'copy-outline', label: 'Copy', key: 'c', mods: ['mod'] },
   { icon: 'clipboard-outline', label: 'Paste', key: 'v', mods: ['mod'] },
   { icon: 'cut-outline', label: 'Cut', key: 'x', mods: ['mod'] },
@@ -132,7 +286,7 @@ const EDIT = [
   { icon: 'search-outline', label: 'Find', key: 'f', mods: ['mod'] },
   { icon: 'refresh-outline', label: 'Refresh', key: 'f5', mods: [] },
 ];
-const BROWSER = [
+const BROWSER: KeyShortcut[] = [
   { icon: 'add-circle-outline', label: 'New tab', key: 't', mods: ['mod'] },
   { icon: 'close-circle-outline', label: 'Close tab', key: 'w', mods: ['mod'] },
   { icon: 'return-up-back-outline', label: 'Reopen tab', key: 't', mods: ['mod', 'shift'] },
@@ -140,7 +294,7 @@ const BROWSER = [
   { icon: 'chevron-back-outline', label: 'Back', key: 'left', mods: ['alt'] },
   { icon: 'chevron-forward-outline', label: 'Forward', key: 'right', mods: ['alt'] },
 ];
-const SYSTEM = [
+const SYSTEM: ActionShortcut[] = [
   { icon: 'swap-horizontal-outline', label: 'Switch app', action: 'switchapp' },
   { icon: 'apps-outline', label: 'Task view', action: 'taskview' },
   { icon: 'desktop-outline', label: 'Desktop', action: 'desktop' },
@@ -148,7 +302,7 @@ const SYSTEM = [
   { icon: 'camera-outline', label: 'Screenshot', action: 'screenshot' },
   { icon: 'lock-closed-outline', label: 'Lock PC', action: 'lock', color: C.warn },
 ];
-const MEDIA = [
+const MEDIA: ActionShortcut[] = [
   { icon: 'volume-low-outline', label: 'Vol -', action: 'vol_down' },
   { icon: 'volume-mute-outline', label: 'Mute', action: 'mute' },
   { icon: 'volume-high-outline', label: 'Vol +', action: 'vol_up' },
@@ -156,88 +310,92 @@ const MEDIA = [
   { icon: 'play-outline', label: 'Play/Pause', action: 'play' },
   { icon: 'play-skip-forward-outline', label: 'Next', action: 'next' },
 ];
-const POWER = [
+const POWER: PowerItem[] = [
   { icon: 'moon-outline', label: 'Sleep', name: 'sleep', note: 'Put the PC to sleep. The phone will disconnect.' },
   { icon: 'snow-outline', label: 'Hibernate', name: 'hibernate', note: 'Save the session to disk and power off.' },
   { icon: 'log-out-outline', label: 'Sign out', name: 'logoff', color: C.warn, note: 'Sign out of the current user. Unsaved work may be lost.' },
   { icon: 'refresh-circle-outline', label: 'Restart', name: 'restart', color: C.warn, note: 'Restart starts in 10 seconds. You can cancel.' },
   { icon: 'power-outline', label: 'Shut down', name: 'shutdown', color: C.danger, note: 'Shutdown starts in 10 seconds. You can cancel.' },
 ];
-const NAV_KEYS = [
+const NAV_KEYS: [string, string][] = [
   ['Esc', 'escape'], ['Tab', 'tab'], ['Del', 'delete'], ['Home', 'home'], ['End', 'end'],
   ['PgUp', 'pageup'], ['PgDn', 'pagedown'], ['↑', 'up'], ['↓', 'down'], ['←', 'left'], ['→', 'right'],
   ['Space', 'space'],
 ];
-const F_KEYS = Array.from({ length: 12 }, (_, i) => [`F${i + 1}`, `f${i + 1}`]);
+const F_KEYS: [string, string][] = Array.from({ length: 12 }, (_, i): [string, string] => [`F${i + 1}`, `f${i + 1}`]);
 
 const SPEED_MIN = 0.6;
 const SPEED_MAX = 5;
 const SPEED_STEP = 0.4;
 const SPEED_SEGMENTS = 12;
 
+const DEFAULT_SETTINGS: Settings = { speed: 1.8, mode: 'rel', dragLock: false, natural: false };
+
+const NO_MODS: Record<ModKey, boolean> = { control: false, alt: false, shift: false, command: false };
+
 export default function App() {
   // ----- connection state -----
-  const [ip, setIp] = useState('192.168.1.5');
-  const [pin, setPin] = useState('4321');
-  const [connecting, setConnecting] = useState(false);
-  const [error, setError] = useState('');
-  const [connected, setConnected] = useState(false);
-  const [host, setHost] = useState({});
-  const [latency, setLatency] = useState(null);
-  const ws = useRef(null);
-  const connTimer = useRef(null);
+  const [ip, setIp] = useState<string>('192.168.1.5');
+  const [pin, setPin] = useState<string>('4321');
+  const [connecting, setConnecting] = useState<boolean>(false);
+  const [error, setError] = useState<string>('');
+  const [connected, setConnected] = useState<boolean>(false);
+  const [host, setHost] = useState<HostInfo>({});
+  const [latency, setLatency] = useState<number | null>(null);
+  const ws = useRef<WebSocket | null>(null);
+  const connTimer = useRef<Timer | undefined>(undefined);
 
   // ----- ui state -----
-  const [tab, setTab] = useState('pad');
-  const [dragUi, setDragUi] = useState(false);
-  const [text, setText] = useState('');
-  const prevText = useRef('');
-  const [mods, setMods] = useState({ control: false, alt: false, shift: false, command: false });
-  const [files, setFiles] = useState([]);
-  const [pending, setPending] = useState(null); // { name, left }
+  const [tab, setTab] = useState<TabKey>('pad');
+  const [dragUi, setDragUi] = useState<boolean>(false);
+  const [text, setText] = useState<string>('');
+  const prevText = useRef<string>('');
+  const [mods, setMods] = useState<Record<ModKey, boolean>>({ ...NO_MODS });
+  const [files, setFiles] = useState<FileItem[]>([]);
+  const [pending, setPending] = useState<PendingPower | null>(null);
 
   // ----- settings (ref for gesture handlers + state for UI) -----
-  const defaults = { speed: 1.8, mode: 'rel', dragLock: false, natural: false };
-  const cfg = useRef({ ...defaults }).current;
-  const [ui, setUi] = useState(defaults);
-  const setCfg = (k, v) => {
+  const cfg = useRef<Settings>({ ...DEFAULT_SETTINGS }).current;
+  const [ui, setUi] = useState<Settings>(DEFAULT_SETTINGS);
+  const setCfg = <K extends keyof Settings>(k: K, v: Settings[K]): void => {
     cfg[k] = v;
     setUi((p) => ({ ...p, [k]: v }));
   };
 
   // ----- gesture + batching refs -----
-  const g = useRef({
+  const g = useRef<GestureData>({
     lx: 0, ly: 0, moved: 0, start: 0, max: 0, lastN: 0, lastDist: 0,
-    timer: null, holdDrag: false, down: false, ox: 0, oy: 0, w: 1, h: 1,
+    timer: undefined, holdDrag: false, down: false, ox: 0, oy: 0, w: 1, h: 1,
   }).current;
-  const acc = useRef({ dx: 0, dy: 0, sy: 0, zoom: 0, abs: null }).current;
-  const padRef = useRef(null);
+  const acc = useRef<Accumulator>({ dx: 0, dy: 0, sy: 0, zoom: 0, abs: null }).current;
+  const padRef = useRef<View>(null);
   const glow = useRef(new Animated.ValueXY()).current;
   const glowOp = useRef(new Animated.Value(0)).current;
 
-  const send = useCallback((o) => {
+  const send = useCallback((o: OutMsg): void => {
     const w = ws.current;
     if (w && w.readyState === 1) w.send(JSON.stringify(o));
   }, []);
 
-  const mouseDown = () => {
+  const mouseDown = (): void => {
     if (!g.down) { g.down = true; send({ t: 'down' }); setDragUi(true); }
   };
-  const mouseUp = () => {
+  const mouseUp = (): void => {
     if (g.down) { g.down = false; send({ t: 'up' }); setDragUi(false); }
   };
 
   // ---------- connect / disconnect ----------
-  const connect = () => {
+  const connect = (): void => {
     if (connecting) return;
     setError('');
     setConnecting(true);
-    let w;
+    let w: WebSocket;
     try {
       w = new WebSocket(`ws://${ip.trim()}:${PORT}`);
     } catch (e) {
       setConnecting(false);
-      return setError('Invalid IP address');
+      setError('Invalid IP address');
+      return;
     }
     ws.current = w;
     connTimer.current = setTimeout(() => {
@@ -245,10 +403,11 @@ export default function App() {
     }, 5000);
     w.onopen = () => {
       clearTimeout(connTimer.current);
-      w.send(JSON.stringify({ t: 'auth', pin }));
+      const authMsg: OutMsg = { t: 'auth', pin };
+      w.send(JSON.stringify(authMsg));
     };
-    w.onmessage = (e) => {
-      const m = JSON.parse(e.data);
+    w.onmessage = (e: MessageEvent) => {
+      const m = JSON.parse(String(e.data)) as InMsg;
       if (m.t === 'auth') {
         setConnecting(false);
         if (m.ok) { setHost(m); setConnected(true); }
@@ -275,7 +434,7 @@ export default function App() {
     };
   };
 
-  const disconnect = () => {
+  const disconnect = (): void => {
     if (g.down) mouseUp();
     ws.current && ws.current.close();
   };
@@ -290,7 +449,7 @@ export default function App() {
     return () => clearTimeout(t);
   }, [pending]);
 
-  const runPower = (p) => {
+  const runPower = (p: PowerItem): void => {
     haptic();
     Alert.alert(`${p.label}?`, p.note, [
       { text: 'Cancel', style: 'cancel' },
@@ -322,7 +481,7 @@ export default function App() {
   }, [connected]);
 
   // ---------- touchpad gesture engine ----------
-  const finish = (s, cancelled) => {
+  const finish = (s: PanResponderGestureState, cancelled: boolean): void => {
     clearTimeout(g.timer);
     Animated.timing(glowOp, { toValue: 0, duration: 200, useNativeDriver: true }).start();
     if (g.holdDrag) {
@@ -354,7 +513,7 @@ export default function App() {
       onMoveShouldSetPanResponder: () => true,
       onPanResponderTerminationRequest: () => false,
 
-      onPanResponderGrant: (e) => {
+      onPanResponderGrant: (e: GestureResponderEvent) => {
         const t = e.nativeEvent.touches;
         g.lx = 0; g.ly = 0; g.moved = 0; g.start = Date.now();
         g.max = t.length; g.lastN = t.length; g.lastDist = 0; g.holdDrag = false;
@@ -377,7 +536,7 @@ export default function App() {
         }, 380);
       },
 
-      onPanResponderMove: (e, s) => {
+      onPanResponderMove: (e: GestureResponderEvent, s: PanResponderGestureState) => {
         const t = e.nativeEvent.touches;
         const n = t.length;
         g.max = Math.max(g.max, n);
@@ -413,39 +572,40 @@ export default function App() {
         }
       },
 
-      onPanResponderRelease: (e, s) => finish(s, false),
-      onPanResponderTerminate: (e, s) => finish(s, true),
+      onPanResponderRelease: (_e: GestureResponderEvent, s: PanResponderGestureState) => finish(s, false),
+      onPanResponderTerminate: (_e: GestureResponderEvent, s: PanResponderGestureState) => finish(s, true),
     })
   ).current;
 
-  const onPadLayout = () => {
+  const onPadLayout = (): void => {
     setTimeout(() => {
-      padRef.current && padRef.current.measureInWindow((x, y, w, h) => {
+      padRef.current && padRef.current.measureInWindow((x: number, y: number, w: number, h: number) => {
         g.ox = x; g.oy = y; g.w = w || 1; g.h = h || 1;
       });
     }, 50);
   };
 
-  const setDragLock = (on) => {
+  const setDragLock = (on: boolean): void => {
     setCfg('dragLock', on);
-    on ? mouseDown() : mouseUp();
+    if (on) mouseDown();
+    else mouseUp();
   };
 
-  const changeSpeed = (dir) => {
+  const changeSpeed = (dir: number): void => {
     const v = +(ui.speed + dir * SPEED_STEP).toFixed(1);
     setCfg('speed', Math.max(SPEED_MIN, Math.min(SPEED_MAX, v)));
   };
 
   // ---------- keyboard ----------
-  const activeMods = () => Object.keys(mods).filter((k) => mods[k]);
-  const clearMods = () => setMods({ control: false, alt: false, shift: false, command: false });
+  const activeMods = (): ModKey[] => (Object.keys(mods) as ModKey[]).filter((k) => mods[k]);
+  const clearMods = (): void => setMods({ ...NO_MODS });
 
-  const sendKey = (key) => {
+  const sendKey = (key: string): void => {
     send({ t: 'key', key, mods: activeMods() });
     clearMods();
   };
 
-  const onType = (t) => {
+  const onType = (t: string): void => {
     const prev = prevText.current;
     if (t.length > prev.length && t.startsWith(prev)) {
       const add = t.slice(prev.length);
@@ -461,26 +621,37 @@ export default function App() {
   };
 
   // ---------- file upload ----------
-  const uploadFile = (file, onProgress) =>
-    new Promise((resolve, reject) => {
+  const uploadFile = (
+    file: DocumentPicker.DocumentPickerAsset,
+    onProgress: (p: number) => void
+  ): Promise<void> =>
+    new Promise<void>((resolve, reject) => {
       const xhr = new XMLHttpRequest();
       xhr.open('POST', `http://${ip.trim()}:${PORT}/upload`);
       xhr.setRequestHeader('x-pin', pin);
-      xhr.upload.onprogress = (e) => e.lengthComputable && onProgress(e.loaded / e.total);
+      xhr.upload.onprogress = (e: ProgressEvent) => {
+        if (e.lengthComputable) onProgress(e.loaded / e.total);
+      };
       xhr.onload = () => (xhr.status === 200 ? resolve() : reject(new Error('HTTP ' + xhr.status)));
       xhr.onerror = () => reject(new Error('Network error'));
       const form = new FormData();
-      form.append('file', { uri: file.uri, name: file.name, type: file.mimeType || 'application/octet-stream' });
+      // React Native's FormData accepts { uri, name, type } objects
+      form.append('file', {
+        uri: file.uri,
+        name: file.name,
+        type: file.mimeType || 'application/octet-stream',
+      } as unknown as Blob);
       xhr.send(form);
     });
 
-  const pickFiles = async () => {
+  const pickFiles = async (): Promise<void> => {
     const r = await DocumentPicker.getDocumentAsync({ multiple: true, copyToCacheDirectory: true, type: '*/*' });
     if (r.canceled) return;
     r.assets.forEach(async (f, i) => {
       const id = Date.now() + '-' + i;
       setFiles((p) => [{ id, name: f.name, size: f.size, progress: 0, status: 'uploading' }, ...p]);
-      const upd = (patch) => setFiles((p) => p.map((x) => (x.id === id ? { ...x, ...patch } : x)));
+      const upd = (patch: Partial<FileItem>): void =>
+        setFiles((p) => p.map((x) => (x.id === id ? { ...x, ...patch } : x)));
       try {
         await uploadFile(f, (pr) => upd({ progress: pr }));
         upd({ progress: 1, status: 'done' });
@@ -548,22 +719,31 @@ export default function App() {
   // =====================================================================
   //                                MAIN SCREEN
   // =====================================================================
-  const latColor = latency == null ? C.sub : latency < 40 ? C.ok : latency < 120 ? C.warn : C.danger;
+  const latColor =
+    latency == null ? C.sub : latency < 40 ? C.ok : latency < 120 ? C.warn : C.danger;
   const winLabel = host.platform === 'darwin' ? 'Cmd' : 'Win';
-  const tabs = [
+  const tabs: { k: TabKey; icon: IconName; l: string }[] = [
     { k: 'pad', icon: 'hand-left-outline', l: 'Touchpad' },
     { k: 'keys', icon: 'keypad-outline', l: 'Keyboard' },
     { k: 'fast', icon: 'flash-outline', l: 'Shortcuts' },
     { k: 'files', icon: 'folder-open-outline', l: 'Files' },
   ];
+  const modButtons: [ModKey, string][] = [
+    ['control', 'Ctrl'],
+    ['alt', 'Alt'],
+    ['shift', 'Shift'],
+    ['command', winLabel],
+  ];
   const speedFilled = Math.round((ui.speed - SPEED_MIN) / SPEED_STEP) + 1;
 
-  const runShortcut = (s) =>
-    s.action ? send({ t: 'action', name: s.action }) : send({ t: 'key', key: s.key, mods: s.mods });
+  const runShortcut = (s: Shortcut): void => {
+    if ('action' in s) send({ t: 'action', name: s.action });
+    else send({ t: 'key', key: s.key, mods: s.mods });
+  };
 
   return (
-    <SafeAreaView style={st.root}>
-      <StatusBar barStyle="light-content" backgroundColor={C.bg} />
+    <SafeAreaView style={st.root} edges={['top', 'left', 'right']}>
+    <StatusBar barStyle="light-content" backgroundColor={C.bg} />
 
       {/* Header */}
       <View style={st.header}>
@@ -598,7 +778,11 @@ export default function App() {
               : `${pending.name === 'restart' ? 'Restarting' : 'Shutting down'} now`}
           </Text>
           {pending.left > 0 && (
-            <TouchableOpacity style={st.bannerBtn} activeOpacity={0.8} onPress={() => { haptic(); send({ t: 'power', name: 'cancel' }); }}>
+            <TouchableOpacity
+              style={st.bannerBtn}
+              activeOpacity={0.8}
+              onPress={() => { haptic(); send({ t: 'power', name: 'cancel' }); }}
+            >
               <Text style={st.bannerBtnTxt}>CANCEL</Text>
             </TouchableOpacity>
           )}
@@ -665,7 +849,7 @@ export default function App() {
 
           {/* Control panel */}
           <View style={st.panel}>
-            <Segmented
+            <Segmented<PadMode>
               value={ui.mode}
               onChange={(v) => setCfg('mode', v)}
               options={[
@@ -729,7 +913,7 @@ export default function App() {
 
             <Text style={st.sectionTitle}>MODIFIERS · TAP, THEN PRESS A KEY</Text>
             <View style={[st.grid, { marginBottom: 24 }]}>
-              {[['control', 'Ctrl'], ['alt', 'Alt'], ['shift', 'Shift'], ['command', winLabel]].map(([k, l]) => (
+              {modButtons.map(([k, l]) => (
                 <ModChip key={k} label={l} active={mods[k]} onPress={() => setMods((p) => ({ ...p, [k]: !p[k] }))} />
               ))}
             </View>
@@ -800,24 +984,27 @@ export default function App() {
 
           <Text style={[st.sectionTitle, { marginTop: 26 }]}>TRANSFERS</Text>
           {files.length === 0 && <Text style={st.empty}>No files sent yet.</Text>}
-          {files.map((f) => (
-            <View key={f.id} style={st.fileRow}>
-              <Ionicons
-                name={f.status === 'done' ? 'checkmark-circle' : f.status === 'error' ? 'alert-circle' : 'document-outline'}
-                size={24}
-                color={f.status === 'done' ? C.text : f.status === 'error' ? C.danger : C.sub}
-              />
-              <View style={{ flex: 1, marginLeft: 12 }}>
-                <Text style={st.fileName} numberOfLines={1}>{f.name}</Text>
-                <View style={st.barBg}>
-                  <View style={[st.barFill, { width: `${Math.round(f.progress * 100)}%`, backgroundColor: f.status === 'error' ? C.danger : C.text }]} />
+          {files.map((f) => {
+            const pct = `${Math.round(f.progress * 100)}%` as `${number}%`;
+            return (
+              <View key={f.id} style={st.fileRow}>
+                <Ionicons
+                  name={f.status === 'done' ? 'checkmark-circle' : f.status === 'error' ? 'alert-circle' : 'document-outline'}
+                  size={24}
+                  color={f.status === 'done' ? C.text : f.status === 'error' ? C.danger : C.sub}
+                />
+                <View style={{ flex: 1, marginLeft: 12 }}>
+                  <Text style={st.fileName} numberOfLines={1}>{f.name}</Text>
+                  <View style={st.barBg}>
+                    <View style={[st.barFill, { width: pct, backgroundColor: f.status === 'error' ? C.danger : C.text }]} />
+                  </View>
+                  <Text style={st.fileMeta}>
+                    {fmtSize(f.size)} · {f.status === 'uploading' ? Math.round(f.progress * 100) + '%' : f.status === 'done' ? 'Sent' : 'Failed'}
+                  </Text>
                 </View>
-                <Text style={st.fileMeta}>
-                  {fmtSize(f.size)} · {f.status === 'uploading' ? Math.round(f.progress * 100) + '%' : f.status === 'done' ? 'Sent' : 'Failed'}
-                </Text>
               </View>
-            </View>
-          ))}
+            );
+          })}
           <View style={{ height: 20 }} />
         </ScrollView>
       )}
@@ -1032,7 +1219,7 @@ const st = StyleSheet.create({
   bannerBtnTxt: { color: C.accent, fontWeight: '800', fontSize: 11, letterSpacing: 1.2 },
 
   // floating bottom navigation
-  tabWrap: { paddingHorizontal: 16, paddingTop: 10, paddingBottom: Platform.OS === 'ios' ? 4 : 12 },
+  tabWrap: { paddingHorizontal: 16, paddingTop: 10, paddingBottom: 0 },
   tabBar: {
     flexDirection: 'row', backgroundColor: C.card, borderRadius: 26, padding: 6, gap: 4,
     borderWidth: 1, borderColor: C.line2,
