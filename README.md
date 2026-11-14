@@ -7,7 +7,7 @@
 ![Platform](https://img.shields.io/badge/PC-Windows%20%7C%20macOS%20%7C%20Linux-000000?style=flat-square)
 ![Mobile](https://img.shields.io/badge/Mobile-iOS%20%7C%20Android-000000?style=flat-square)
 ![Expo](https://img.shields.io/badge/Expo-React%20Native-000000?style=flat-square&logo=expo)
-![TypeScript](https://img.shields.io/badge/TypeScript-App.tsx-000000?style=flat-square&logo=typescript)
+![TypeScript](https://img.shields.io/badge/TypeScript-5-000000?style=flat-square&logo=typescript)
 ![Node](https://img.shields.io/badge/Node.js-18%2B-000000?style=flat-square&logo=node.js)
 
 </div>
@@ -16,12 +16,12 @@
 
 ## Overview
 
-AirPad has two parts that talk over your local Wi-Fi:
+AirPad has two parts that live in the same repository and talk over your local Wi-Fi:
 
-| Part | What it is | Tech |
+| Part | What it is | Where |
 | --- | --- | --- |
-| **Mobile app** | Touchpad, keyboard, shortcuts and file sender | Expo, React Native, TypeScript |
-| **PC server** | Receives commands and controls the mouse and keyboard | Node.js, `ws`, `busboy`, `@jitsi/robotjs` |
+| **Mobile app** | Touchpad, keyboard, shortcuts and file sender (Expo, React Native, TypeScript) | `src/` |
+| **PC server** | Receives commands and controls the mouse and keyboard (Node.js) | `server.js` |
 
 No cloud, no account, no internet needed. Your phone connects directly to your PC.
 
@@ -31,7 +31,7 @@ No cloud, no account, no internet needed. Your phone connects directly to your P
   - 1 finger: move, tap to click, long-press to drag
   - 2 fingers: scroll, pinch to zoom, tap to right-click
   - 3 fingers: swipe up for Task View, swipe down for Desktop, swipe sideways to switch apps, tap for middle click
-- **Relative and Absolute modes**, plus pointer acceleration and adjustable speed
+- **Relative and Absolute modes**, with pointer acceleration and adjustable speed
 - **Drag lock** and **natural scroll**
 - **Live keyboard**: type on your phone and it appears on the PC instantly
 - **Modifier keys** (Ctrl, Alt, Shift, Win/Cmd), special keys and F1 to F12
@@ -41,12 +41,30 @@ No cloud, no account, no internet needed. Your phone connects directly to your P
 - **Live latency indicator** in the header
 - **PIN protection**: three wrong attempts disconnect the client
 
+## Project structure
+
+```
+remote-mouse-app/
+├── assets/            # App icons and images
+├── scripts/           # Helper scripts
+├── src/               # Mobile app source (TypeScript)
+├── app.json           # Expo configuration
+├── expo-env.d.ts      # Expo TypeScript types
+├── package.json       # Dependencies for both the app and the server
+├── server.js          # PC server (WebSocket + HTTP upload)
+├── tsconfig.json      # TypeScript configuration
+├── LICENSE
+└── README.md
+```
+
+The app and the server share one `package.json`, so a single `npm install` sets up both.
+
 ## Requirements
 
 **On your PC**
 
 - Node.js 18 or newer
-- Build tools for native modules, only if `@jitsi/robotjs` has no prebuilt binary for your system
+- Build tools for native modules, only if `@jitsi/robotjs` has no prebuilt binary for your system:
   - Windows: Visual Studio Build Tools (C++ workload)
   - macOS: `xcode-select --install`
   - Linux: `build-essential libxtst-dev libpng-dev`
@@ -57,27 +75,25 @@ No cloud, no account, no internet needed. Your phone connects directly to your P
 
 Your phone and PC must be on the **same Wi-Fi network**.
 
-## Project structure
-
-```
-airpad/
-├── server/
-│   ├── server.js        # PC server (WebSocket + HTTP upload)
-│   └── package.json
-└── app/
-    ├── App.tsx          # Mobile app
-    ├── package.json
-    └── ...              # Expo project files
-```
-
 ## Quick start
 
-### 1. Start the PC server
+### 1. Install dependencies
 
 ```bash
-cd server
-npm init -y
+git clone <your-repo-url>
+cd remote-mouse-app
+npm install
+```
+
+If the server packages are not already listed in `package.json`, add them:
+
+```bash
 npm install ws busboy @jitsi/robotjs
+```
+
+### 2. Start the PC server
+
+```bash
 node server.js
 ```
 
@@ -94,7 +110,7 @@ $env:PIN="9876"; node server.js
 set PIN=9876 && node server.js
 ```
 
-On startup the server prints your PIN, the upload folder, and your PC's local IP addresses:
+On startup the server prints your PIN, the upload folder and your PC's local IP addresses:
 
 ```
 AirPad server running on port 8080
@@ -103,16 +119,9 @@ Files from your phone are saved to: C:\Users\you\Downloads\PhoneDrops
 Enter one of these IPs in the app: 192.168.1.5
 ```
 
-### 2. Set up the mobile app
+### 3. Start the mobile app
 
-```bash
-npx create-expo-app@latest airpad-app --template blank-typescript
-cd airpad-app
-
-npx expo install expo-document-picker expo-haptics @expo/vector-icons react-native-safe-area-context
-```
-
-Replace the generated `App.tsx` with the AirPad `App.tsx`, then start it:
+In a second terminal:
 
 ```bash
 npx expo start
@@ -120,13 +129,31 @@ npx expo start
 
 Scan the QR code with **Expo Go** (Android) or the **Camera app** (iOS).
 
-### 3. Connect
+### 4. Connect
 
 1. Enter the **PC IP address** printed by the server.
 2. Enter the **PIN**.
 3. Tap **Connect**.
 
-The default values in the app are `192.168.1.5` and `4321`. Change them in `App.tsx`, or type yours on the connect screen.
+The default values in the app are `192.168.1.5` and `4321`. Change them in the app source, or type yours on the connect screen.
+
+### Optional: npm scripts
+
+Add these to the `scripts` section of `package.json` so you can run everything with short commands:
+
+```json
+{
+  "scripts": {
+    "server": "node server.js",
+    "app": "expo start"
+  }
+}
+```
+
+```bash
+npm run server
+npm run app
+```
 
 ## Using AirPad
 
@@ -157,7 +184,7 @@ The default values in the app are `192.168.1.5` and `4321`. Change them in `App.
 | Setting | Where | Default |
 | --- | --- | --- |
 | PIN | `PIN` environment variable on the server | `4321` |
-| Port | `PORT` in `server.js` and `App.tsx` (keep both the same) | `8080` |
+| Port | `PORT` in `server.js` and in the app source (keep both the same) | `8080` |
 | Upload folder | `DROP_DIR` in `server.js` | `~/Downloads/PhoneDrops` |
 | Shutdown/restart delay | `POWER_DELAY` in `server.js` | `10` seconds |
 | Scroll direction | `SCROLL_SIGN` in `server.js` (set to `-1` to flip) | `1` |
@@ -224,19 +251,17 @@ File upload uses `POST /upload` (multipart form) with an `x-pin` header.
 ## Scripts cheat sheet
 
 ```bash
-# server
-node server.js              # start with the default PIN
-PIN=9876 node server.js     # start with a custom PIN
-
-# app
-npx expo start              # start the dev server
-npx expo start --clear      # start with a cleared cache
+npm install                 # install everything
+node server.js              # start the server (default PIN)
+PIN=9876 node server.js     # start the server (custom PIN)
+npx expo start              # start the app
+npx expo start --clear      # start the app with a cleared cache
 npx tsc --noEmit            # type-check the app
 ```
 
 ## License
 
-Released under the MIT License. Use it, modify it and share it.
+Released under the terms of the [LICENSE](./LICENSE) file in this repository.
 
 <div align="center">
 
